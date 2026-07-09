@@ -66,6 +66,18 @@ export class RoomManager {
     return roomId ? this.rooms.get(roomId) : null;
   }
 
+  rematch(playerId) {
+    const room = this.getRoomByPlayer(playerId);
+    if (!room) return { ok: false, error: 'Комната не найдена' };
+    if (!room.game || room.game.status !== 'finished') {
+      return { ok: false, error: 'Игра ещё не окончена' };
+    }
+    const playerIds = room.players.map(p => p.id);
+    room.game = new DurakGame(playerIds);
+    room.status = 'playing';
+    return { ok: true, room };
+  }
+
   handleAction(playerId, action, payload) {
     const room = this.getRoomByPlayer(playerId);
     if (!room || !room.game) return { ok: false, error: 'Игра не найдена' };

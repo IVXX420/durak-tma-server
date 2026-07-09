@@ -96,6 +96,26 @@ io.on('connection', (socket) => {
     emitGameState(result.room);
   });
 
+  socket.on('game:rematch', (callback) => {
+    const result = roomManager.rematch(playerId);
+    if (!result.ok) {
+      callback?.(result);
+      return;
+    }
+    callback?.({ ok: true });
+    emitGameState(result.room);
+  });
+
+  socket.on('game:reaction', (data) => {
+    const room = roomManager.getRoomByPlayer(playerId);
+    if (!room) return;
+    socket.to(room.id).emit('game:reaction', {
+      emoji: data?.emoji,
+      from: playerId,
+      fromName: playerName,
+    });
+  });
+
   socket.on('disconnect', () => {
     if (playerId) {
       const room = roomManager.getRoomByPlayer(playerId);
