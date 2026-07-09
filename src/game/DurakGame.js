@@ -2,13 +2,17 @@ import { createDeck, shuffle } from './deck.js';
 import { RANK_VALUE } from './types.js';
 
 export class DurakGame {
-  constructor(playerIds) {
+  constructor(playerIds, options = {}) {
     this.playerIds = playerIds;
+    this.deckSize = options.deckSize === 24 ? 24 : 36;
+    this.gameMode = options.gameMode === 'perevodnoy' ? 'perevodnoy' : 'podkidnoy';
+    this.allowCheating = Boolean(options.allowCheating);
     this.deck = [];
     this.trump = null;
     this.trumpSuit = null;
     this.hands = {};
     this.attackerIndex = 0;
+    this.defenderIndex = 1;
     this.table = [];
     this.phase = 'attack';
     this.status = 'playing';
@@ -21,7 +25,7 @@ export class DurakGame {
   }
 
   init() {
-    this.deck = shuffle(createDeck());
+    this.deck = shuffle(createDeck(this.deckSize));
     this.trump = this.deck[this.deck.length - 1];
     this.trumpSuit = this.trump.suit;
 
@@ -38,6 +42,7 @@ export class DurakGame {
     }
 
     this.attackerIndex = this.findLowestTrumpHolder();
+    this.defenderIndex = (this.attackerIndex + 1) % this.playerIds.length;
     this.startRound();
   }
 
@@ -65,13 +70,14 @@ export class DurakGame {
   }
 
   get defenderId() {
-    return this.playerIds[(this.attackerIndex + 1) % this.playerIds.length];
+    return this.playerIds[this.defenderIndex];
   }
 
   startRound() {
     this.table = [];
     this.phase = 'attack';
     this.roundPassed = false;
+    this.defenderIndex = (this.attackerIndex + 1) % this.playerIds.length;
     this.defenderHandSizeAtRoundStart = this.hands[this.defenderId].length;
     this.lastAction = null;
   }
@@ -144,12 +150,7 @@ export class DurakGame {
 
     hand.splice(cardIndex, 1);
     this.table.push({ attack: card, defend: null });
-
-    if (this.phase === 'attack') {
-      this.phase = 'defend';
-    } else {
-      this.phase = 'defend';
-    }
+    this.phase = 'defend';
 
     this.lastAction = { type: 'attack', playerId, card };
     this.checkGameEnd();
@@ -191,6 +192,46 @@ export class DurakGame {
       this.phase = 'throw';
     }
 
+    this.checkGameEnd();
+    return { ok: true };
+  }
+
+  translate(playerId, cardId) {
+    if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
+    if (this.gameMode !== 'perevodnoy') return { ok: false, error: 'Перевод недоступен' };
+    if (playerId !== this.defenderId) return { ok: false, error: 'Только защитник может переводить' };
+    if (this.phase !== 'defend') return { ok: false, error: 'Сейчас нельзя переводить' };
+    if (this.playerIds.length < 3) return { ok: false, error: 'Переводной режим от 3 игроков' };
+
+    const ranks = this.getTableRanks();
+    if (ranks.size === 0) return { ok: false, error: 'Стол пуст' };
+
+    const hand = this.hands[playerId];
+    const cardIndex = hand.findIndex(c => c.id === cardId);
+    if (cardIndex === -1) return { ok: false, error: 'Карты нет в руке' };
+
+    const card = hand[cardIndex];
+    if (!ranks.has(card.rank)) {
+      return { ok: false, error: 'Нужна карта того же достоинства, что на столе' };
+    }
+
+    if (this.table.length >= this.maxTableSize()) {
+      return { ok: false, error: 'Стол полон' };
+    }
+
+    const n = this.playerIds.length;
+    const nextDef = (this.defenderIndex + 1) % n;
+    if (nextDef === this.attackerIndex) {
+      return { ok: false, error: 'Некому переводить' };
+    }
+
+    hand.splice(cardIndex, 1);
+    this.table.push({ attack: card, defend: null });
+    this.defenderIndex = nextDef;
+    this.defenderHandSizeAtRoundStart = this.hands[this.defenderId].length;
+
+    this.lastAction = { type: 'translate', playerId, card };
+    this.phase = 'defend';
     this.checkGameEnd();
     return { ok: true };
   }
@@ -267,9 +308,21 @@ export class DurakGame {
   getStateForPlayer(playerId) {
     const opponents = this.playerIds
       .filter(id => id !== playerId)
-      .map(id => ({ id, cardCount: (this.hands[id] || []).length }));
+      .map(id => {
+        const entry = { id, cardCount: (this.hands[id] || []).length };
+        if (this.allowCheating) {
+          entry.hand = [...(this.hands[id] || [])];
+        }
+        return entry;
+      });
 
     const legacyOpponent = opponents[0];
+    const tableRanks = this.getTableRanks();
+    const canTranslate = this.gameMode === 'perevodnoy'
+      && this.phase === 'defend'
+      && playerId === this.defenderId
+      && this.playerIds.length >= 3
+      && (this.hands[playerId] || []).some(c => tableRanks.has(c.rank));
 
     return {
       status: this.status,
@@ -287,9 +340,13 @@ export class DurakGame {
       isAttacker: playerId === this.attackerId,
       isDefender: playerId === this.defenderId,
       canThrow: this.phase === 'throw' && playerId !== this.defenderId,
+      canTranslate,
       isYourTurn: this.isPlayerTurn(playerId),
       winner: this.winner,
       fool: this.fool,
+      gameMode: this.gameMode,
+      deckSize: this.deckSize,
+      allowCheating: this.allowCheating,
       lastAction: this.lastAction,
       maxTableSize: this.maxTableSize(),
     };

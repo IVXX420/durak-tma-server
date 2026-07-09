@@ -1,6 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
 import { DurakGame } from '../game/DurakGame.js';
 
+function gameOptionsFromRoom(room) {
+  return {
+    deckSize: room.deckSize,
+    gameMode: room.gameMode,
+    allowCheating: room.allowCheating,
+  };
+}
+
 export class RoomManager {
   constructor() {
     this.rooms = new Map();
@@ -10,6 +18,10 @@ export class RoomManager {
   createRoom(hostId, hostName, options = {}) {
     const isPublic = Boolean(options.isPublic);
     const maxPlayers = Math.min(Math.max(options.maxPlayers || 2, 2), 4);
+    const deckSize = options.deckSize === 24 ? 24 : 36;
+    let gameMode = options.gameMode === 'perevodnoy' ? 'perevodnoy' : 'podkidnoy';
+    if (gameMode === 'perevodnoy' && maxPlayers < 3) gameMode = 'podkidnoy';
+
     const roomId = uuidv4().slice(0, 6).toUpperCase();
     const room = {
       id: roomId,
@@ -18,6 +30,9 @@ export class RoomManager {
       status: 'waiting',
       isPublic,
       maxPlayers,
+      deckSize,
+      gameMode,
+      allowCheating: Boolean(options.allowCheating),
       hostId,
       createdAt: Date.now(),
     };
@@ -59,7 +74,7 @@ export class RoomManager {
     if (room.players.length < 2) return { ok: false, error: 'Нужно минимум 2 игрока' };
 
     const playerIds = room.players.map(p => p.id);
-    room.game = new DurakGame(playerIds);
+    room.game = new DurakGame(playerIds, gameOptionsFromRoom(room));
     room.status = 'playing';
     return { ok: true, room };
   }
@@ -86,6 +101,9 @@ export class RoomManager {
       hostName: room.players[0]?.name || 'Хост',
       playerCount: room.players.length,
       maxPlayers: room.maxPlayers,
+      deckSize: room.deckSize,
+      gameMode: room.gameMode,
+      allowCheating: room.allowCheating,
     };
   }
 
@@ -96,7 +114,7 @@ export class RoomManager {
       return { ok: false, error: 'Игра ещё не окончена' };
     }
     const playerIds = room.players.map(p => p.id);
-    room.game = new DurakGame(playerIds);
+    room.game = new DurakGame(playerIds, gameOptionsFromRoom(room));
     room.status = 'playing';
     return { ok: true, room };
   }
@@ -112,6 +130,9 @@ export class RoomManager {
         break;
       case 'defend':
         result = room.game.defend(playerId, payload.cardId, payload.attackIndex);
+        break;
+      case 'translate':
+        result = room.game.translate(playerId, payload.cardId);
         break;
       case 'take':
         result = room.game.take(playerId);
@@ -133,6 +154,9 @@ export class RoomManager {
       isPublic: room.isPublic,
       maxPlayers: room.maxPlayers,
       hostId: room.hostId,
+      deckSize: room.deckSize,
+      gameMode: room.gameMode,
+      allowCheating: room.allowCheating,
       players: room.players.map(p => ({ id: p.id, name: p.name })),
     };
   }
@@ -143,12 +167,13 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return null;
 
+    const wasPublic = room.isPublic;
     room.players = room.players.filter(p => p.id !== playerId);
     this.playerRooms.delete(playerId);
 
     if (room.players.length === 0) {
       this.rooms.delete(roomId);
-      return { room: null, wasPublic: room.isPublic };
+      return { room: null, wasPublic };
     }
 
     if (room.hostId === playerId) {
@@ -163,6 +188,6 @@ export class RoomManager {
       }
     }
 
-    return { room, wasPublic: room.isPublic };
+    return { room, wasPublic };
   }
 }

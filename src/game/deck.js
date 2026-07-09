@@ -1,10 +1,11 @@
 import { SUITS, RANKS } from './types.js';
 
-export function createDeck() {
+export function createDeck(deckSize = 36) {
+  const ranks = deckSize === 24 ? ['9', '10', 'J', 'Q', 'K', 'A'] : RANKS;
   const deck = [];
   let id = 0;
   for (const suit of SUITS) {
-    for (const rank of RANKS) {
+    for (const rank of ranks) {
       deck.push({ id: `card-${id++}`, suit, rank });
     }
   }
