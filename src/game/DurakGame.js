@@ -1,0 +1,295 @@
+import { createDeck, shuffle } from './deck.js';
+import { RANK_VALUE } from './types.js';
+
+export class DurakGame {
+  constructor(playerIds) {
+    this.playerIds = playerIds;
+    this.deck = [];
+    this.trump = null;
+    this.trumpSuit = null;
+    this.hands = {};
+    this.attackerIndex = 0;
+    this.table = [];
+    this.phase = 'attack';
+    this.status = 'playing';
+    this.winner = null;
+    this.fool = null;
+    this.defenderHandSizeAtRoundStart = 0;
+    this.roundPassed = false;
+    this.lastAction = null;
+    this.init();
+  }
+
+  init() {
+    this.deck = shuffle(createDeck());
+    this.trump = this.deck[this.deck.length - 1];
+    this.trumpSuit = this.trump.suit;
+
+    for (const id of this.playerIds) {
+      this.hands[id] = [];
+    }
+
+    for (let i = 0; i < 6; i++) {
+      for (const id of this.playerIds) {
+        if (this.deck.length > 0) {
+          this.hands[id].push(this.deck.shift());
+        }
+      }
+    }
+
+    this.attackerIndex = this.findLowestTrumpHolder();
+    this.startRound();
+  }
+
+  findLowestTrumpHolder() {
+    let bestIndex = 0;
+    let bestValue = Infinity;
+
+    this.playerIds.forEach((id, index) => {
+      for (const card of this.hands[id]) {
+        if (card.suit === this.trumpSuit) {
+          const value = RANK_VALUE[card.rank];
+          if (value < bestValue) {
+            bestValue = value;
+            bestIndex = index;
+          }
+        }
+      }
+    });
+
+    return bestIndex;
+  }
+
+  get attackerId() {
+    return this.playerIds[this.attackerIndex];
+  }
+
+  get defenderId() {
+    return this.playerIds[(this.attackerIndex + 1) % this.playerIds.length];
+  }
+
+  startRound() {
+    this.table = [];
+    this.phase = 'attack';
+    this.roundPassed = false;
+    this.defenderHandSizeAtRoundStart = this.hands[this.defenderId].length;
+    this.lastAction = null;
+  }
+
+  canBeat(attackCard, defendCard) {
+    if (defendCard.suit === attackCard.suit) {
+      return RANK_VALUE[defendCard.rank] > RANK_VALUE[attackCard.rank];
+    }
+    if (defendCard.suit === this.trumpSuit && attackCard.suit !== this.trumpSuit) {
+      return true;
+    }
+    if (defendCard.suit === this.trumpSuit && attackCard.suit === this.trumpSuit) {
+      return RANK_VALUE[defendCard.rank] > RANK_VALUE[attackCard.rank];
+    }
+    return false;
+  }
+
+  getUnbeatenCards() {
+    return this.table.filter(pair => !pair.defend);
+  }
+
+  getTableRanks() {
+    const ranks = new Set();
+    for (const pair of this.table) {
+      ranks.add(pair.attack.rank);
+      if (pair.defend) ranks.add(pair.defend.rank);
+    }
+    return ranks;
+  }
+
+  maxTableSize() {
+    return Math.min(this.defenderHandSizeAtRoundStart, 6);
+  }
+
+  attack(playerId, cardId) {
+    if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
+    if (playerId !== this.attackerId) return { ok: false, error: 'Не ваш ход' };
+    if (!['attack', 'throw'].includes(this.phase)) return { ok: false, error: 'Сейчас нельзя атаковать' };
+
+    const hand = this.hands[playerId];
+    const cardIndex = hand.findIndex(c => c.id === cardId);
+    if (cardIndex === -1) return { ok: false, error: 'Карты нет в руке' };
+
+    const card = hand[cardIndex];
+
+    if (this.phase === 'attack' && this.table.length === 0) {
+      // First attack - any card
+    } else if (this.phase === 'attack' && this.table.length > 0) {
+      const firstRank = this.table[0].attack.rank;
+      if (card.rank !== firstRank) {
+        return { ok: false, error: 'Первый ход — карты одного достоинства' };
+      }
+    } else if (this.phase === 'throw') {
+      const ranks = this.getTableRanks();
+      if (!ranks.has(card.rank)) {
+        return { ok: false, error: 'Можно подкидывать только совпадающие достоинства' };
+      }
+      if (this.getUnbeatenCards().length > 0) {
+        return { ok: false, error: 'Сначала защитник должен отбить карты' };
+      }
+    }
+
+    if (this.table.length >= this.maxTableSize()) {
+      return { ok: false, error: 'Стол полон' };
+    }
+
+    hand.splice(cardIndex, 1);
+    this.table.push({ attack: card, defend: null });
+
+    if (this.phase === 'attack') {
+      this.phase = 'defend';
+    } else {
+      this.phase = 'defend';
+    }
+
+    this.lastAction = { type: 'attack', playerId, card };
+    this.checkGameEnd();
+    return { ok: true };
+  }
+
+  defend(playerId, cardId, attackIndex) {
+    if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
+    if (playerId !== this.defenderId) return { ok: false, error: 'Вы не защищаетесь' };
+    if (this.phase !== 'defend') return { ok: false, error: 'Сейчас не фаза защиты' };
+
+    const unbeaten = this.getUnbeatenCards();
+    if (unbeaten.length === 0) return { ok: false, error: 'Нет карт для отбивания' };
+
+    let targetPair;
+    if (attackIndex !== undefined && attackIndex !== null) {
+      targetPair = this.table[attackIndex];
+      if (!targetPair || targetPair.defend) {
+        return { ok: false, error: 'Неверная карта на столе' };
+      }
+    } else {
+      targetPair = unbeaten[0];
+    }
+
+    const hand = this.hands[playerId];
+    const cardIndex = hand.findIndex(c => c.id === cardId);
+    if (cardIndex === -1) return { ok: false, error: 'Карты нет в руке' };
+
+    const card = hand[cardIndex];
+    if (!this.canBeat(targetPair.attack, card)) {
+      return { ok: false, error: 'Эта карта не бьёт' };
+    }
+
+    hand.splice(cardIndex, 1);
+    targetPair.defend = card;
+    this.lastAction = { type: 'defend', playerId, card };
+
+    if (this.getUnbeatenCards().length === 0) {
+      this.phase = 'throw';
+    }
+
+    this.checkGameEnd();
+    return { ok: true };
+  }
+
+  take(playerId) {
+    if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
+    if (playerId !== this.defenderId) return { ok: false, error: 'Только защитник может взять' };
+    if (this.table.length === 0) return { ok: false, error: 'Стол пуст' };
+
+    const hand = this.hands[playerId];
+    for (const pair of this.table) {
+      hand.push(pair.attack);
+      if (pair.defend) hand.push(pair.defend);
+    }
+
+    this.lastAction = { type: 'take', playerId };
+    this.endRound(false);
+    return { ok: true };
+  }
+
+  pass(playerId) {
+    if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
+    if (playerId !== this.attackerId) return { ok: false, error: 'Только атакующий может сказать «Бито»' };
+    if (this.phase !== 'throw') return { ok: false, error: 'Сейчас нельзя пасовать' };
+    if (this.getUnbeatenCards().length > 0) {
+      return { ok: false, error: 'Есть неотбитые карты' };
+    }
+    if (this.table.length === 0) {
+      return { ok: false, error: 'Стол пуст' };
+    }
+
+    this.lastAction = { type: 'pass', playerId };
+    this.endRound(true);
+    return { ok: true };
+  }
+
+  endRound(defended) {
+    if (defended) {
+      this.attackerIndex = (this.attackerIndex + 1) % this.playerIds.length;
+    }
+
+    this.drawCards();
+    this.checkGameEnd();
+
+    if (this.status === 'playing') {
+      this.startRound();
+    }
+  }
+
+  drawCards() {
+    const order = [this.attackerId, this.defenderId];
+    for (const id of order) {
+      while (this.hands[id].length < 6 && this.deck.length > 0) {
+        this.hands[id].push(this.deck.shift());
+      }
+    }
+  }
+
+  checkGameEnd() {
+    const playersWithCards = this.playerIds.filter(id => this.hands[id].length > 0);
+    if (this.deck.length === 0 && playersWithCards.length <= 1) {
+      this.status = 'finished';
+      if (playersWithCards.length === 0) {
+        this.winner = null;
+        this.fool = null;
+      } else if (playersWithCards.length === 1) {
+        this.fool = playersWithCards[0];
+        this.winner = this.playerIds.find(id => id !== this.fool);
+      }
+    }
+  }
+
+  getStateForPlayer(playerId) {
+    const opponentId = this.playerIds.find(id => id !== playerId);
+    return {
+      status: this.status,
+      trump: this.trump,
+      trumpSuit: this.trumpSuit,
+      deckCount: this.deck.length,
+      hand: this.hands[playerId] || [],
+      opponentCardCount: (this.hands[opponentId] || []).length,
+      table: this.table,
+      phase: this.phase,
+      attackerId: this.attackerId,
+      defenderId: this.defenderId,
+      isAttacker: playerId === this.attackerId,
+      isDefender: playerId === this.defenderId,
+      isYourTurn: this.isPlayerTurn(playerId),
+      winner: this.winner,
+      fool: this.fool,
+      lastAction: this.lastAction,
+      maxTableSize: this.maxTableSize(),
+    };
+  }
+
+  isPlayerTurn(playerId) {
+    if (this.status !== 'playing') return false;
+    if (this.phase === 'attack' || this.phase === 'throw') {
+      return playerId === this.attackerId;
+    }
+    if (this.phase === 'defend') {
+      return playerId === this.defenderId;
+    }
+    return false;
+  }
+}

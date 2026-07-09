@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: durak-tma-server
+    runtime: node
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
