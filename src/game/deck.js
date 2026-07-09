@@ -1,7 +1,14 @@
-import { SUITS, RANKS } from './types.js';
+import { SUITS } from './types.js';
+
+const DECK_RANKS = {
+  24: ['9', '10', 'J', 'Q', 'K', 'A'],
+  36: ['6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'],
+  52: ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'],
+};
 
 export function createDeck(deckSize = 36) {
-  const ranks = deckSize === 24 ? ['9', '10', 'J', 'Q', 'K', 'A'] : RANKS;
+  const size = DECK_RANKS[deckSize] ? deckSize : 36;
+  const ranks = DECK_RANKS[size];
   const deck = [];
   let id = 0;
   for (const suit of SUITS) {

@@ -4,7 +4,7 @@ import { RANK_VALUE } from './types.js';
 export class DurakGame {
   constructor(playerIds, options = {}) {
     this.playerIds = playerIds;
-    this.deckSize = options.deckSize === 24 ? 24 : 36;
+    this.deckSize = [24, 36, 52].includes(options.deckSize) ? options.deckSize : 36;
     this.gameMode = options.gameMode === 'perevodnoy' ? 'perevodnoy' : 'podkidnoy';
     this.allowCheating = Boolean(options.allowCheating);
     this.deck = [];
@@ -180,12 +180,15 @@ export class DurakGame {
     if (cardIndex === -1) return { ok: false, error: 'Карты нет в руке' };
 
     const card = hand[cardIndex];
-    if (!this.canBeat(targetPair.attack, card)) {
+    const valid = this.canBeat(targetPair.attack, card);
+    if (!valid && !this.allowCheating) {
       return { ok: false, error: 'Эта карта не бьёт' };
     }
 
     hand.splice(cardIndex, 1);
     targetPair.defend = card;
+    targetPair.defendPlayerId = playerId;
+    targetPair.defendValid = valid;
     this.lastAction = { type: 'defend', playerId, card };
 
     if (this.getUnbeatenCards().length === 0) {
@@ -233,6 +236,36 @@ export class DurakGame {
     this.lastAction = { type: 'translate', playerId, card };
     this.phase = 'defend';
     this.checkGameEnd();
+    return { ok: true };
+  }
+
+  challenge(playerId, attackIndex) {
+    if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
+    if (!this.allowCheating) return { ok: false, error: 'Жульничество отключено' };
+    if (!['defend', 'throw'].includes(this.phase)) {
+      return { ok: false, error: 'Сейчас нельзя проверять' };
+    }
+
+    const pair = this.table[attackIndex];
+    if (!pair?.defend) return { ok: false, error: 'Нет карты для проверки' };
+    if (pair.defendPlayerId === playerId) {
+      return { ok: false, error: 'Нельзя проверять свою карту' };
+    }
+    if (pair.defendValid !== false) {
+      return { ok: false, error: 'Карта отбита честно' };
+    }
+
+    const cheaterId = pair.defendPlayerId;
+    this.hands[cheaterId].push(pair.defend);
+    pair.defend = null;
+    pair.defendPlayerId = null;
+    pair.defendValid = undefined;
+
+    if (this.getUnbeatenCards().length > 0) {
+      this.phase = 'defend';
+    }
+
+    this.lastAction = { type: 'challenge', playerId };
     return { ok: true };
   }
 
@@ -308,13 +341,7 @@ export class DurakGame {
   getStateForPlayer(playerId) {
     const opponents = this.playerIds
       .filter(id => id !== playerId)
-      .map(id => {
-        const entry = { id, cardCount: (this.hands[id] || []).length };
-        if (this.allowCheating) {
-          entry.hand = [...(this.hands[id] || [])];
-        }
-        return entry;
-      });
+      .map(id => ({ id, cardCount: (this.hands[id] || []).length }));
 
     const legacyOpponent = opponents[0];
     const tableRanks = this.getTableRanks();
@@ -333,7 +360,11 @@ export class DurakGame {
       opponents,
       opponentCardCount: legacyOpponent?.cardCount ?? 0,
       playerCount: this.playerIds.length,
-      table: this.table,
+      table: this.table.map(pair => ({
+        attack: pair.attack,
+        defend: pair.defend,
+        defendPlayerId: pair.defendPlayerId || null,
+      })),
       phase: this.phase,
       attackerId: this.attackerId,
       defenderId: this.defenderId,

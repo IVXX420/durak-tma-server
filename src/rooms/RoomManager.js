@@ -10,35 +10,46 @@ function gameOptionsFromRoom(room) {
 }
 
 export class RoomManager {
-  constructor() {
+  constructor(walletManager) {
     this.rooms = new Map();
     this.playerRooms = new Map();
+    this.wallet = walletManager;
   }
 
   createRoom(hostId, hostName, options = {}) {
-    const isPublic = Boolean(options.isPublic);
+    const isPublic = options.isPublic === true
+      || options.isPublic === 'true'
+      || options.public === true;
     const maxPlayers = Math.min(Math.max(options.maxPlayers || 2, 2), 4);
-    const deckSize = options.deckSize === 24 ? 24 : 36;
+    const deckSize = [24, 36, 52].includes(options.deckSize) ? options.deckSize : 36;
     let gameMode = options.gameMode === 'perevodnoy' ? 'perevodnoy' : 'podkidnoy';
     if (gameMode === 'perevodnoy' && maxPlayers < 3) gameMode = 'podkidnoy';
+    const entryFee = Math.max(0, Math.min(options.entryFee || 0, 5000));
+    const allowCheating = Boolean(options.allowCheating);
+
+    if (entryFee > 0) {
+      const pay = this.wallet.deduct(hostId, entryFee);
+      if (!pay.ok) return { ok: false, error: pay.error };
+    }
 
     const roomId = uuidv4().slice(0, 6).toUpperCase();
     const room = {
       id: roomId,
-      players: [{ id: hostId, name: hostName, socketId: null }],
+      players: [{ id: hostId, name: hostName, socketId: null, paidEntry: entryFee }],
       game: null,
       status: 'waiting',
       isPublic,
       maxPlayers,
       deckSize,
       gameMode,
-      allowCheating: Boolean(options.allowCheating),
+      allowCheating,
+      entryFee,
       hostId,
       createdAt: Date.now(),
     };
     this.rooms.set(roomId, room);
     this.playerRooms.set(hostId, roomId);
-    return room;
+    return { ok: true, room };
   }
 
   joinRoom(roomId, playerId, playerName) {
@@ -52,7 +63,17 @@ export class RoomManager {
       return { ok: true, room };
     }
 
-    room.players.push({ id: playerId, name: playerName, socketId: null });
+    if (room.entryFee > 0) {
+      const pay = this.wallet.deduct(playerId, room.entryFee);
+      if (!pay.ok) return { ok: false, error: pay.error };
+    }
+
+    room.players.push({
+      id: playerId,
+      name: playerName,
+      socketId: null,
+      paidEntry: room.entryFee,
+    });
     this.playerRooms.set(playerId, room.id);
     return { ok: true, room };
   }
@@ -104,7 +125,20 @@ export class RoomManager {
       deckSize: room.deckSize,
       gameMode: room.gameMode,
       allowCheating: room.allowCheating,
+      entryFee: room.entryFee,
     };
+  }
+
+  payWinner(room) {
+    if (!room.game || room.game.status !== 'finished') return;
+    let winner = room.game.winner;
+    if (!winner && room.game.fool) {
+      winner = room.game.playerIds.find(id => id !== room.game.fool);
+    }
+    if (!winner) return;
+
+    const pot = room.players.reduce((sum, p) => sum + (p.paidEntry || 0), 0);
+    if (pot > 0) this.wallet.add(winner, pot);
   }
 
   rematch(playerId) {
@@ -134,6 +168,9 @@ export class RoomManager {
       case 'translate':
         result = room.game.translate(playerId, payload.cardId);
         break;
+      case 'challenge':
+        result = room.game.challenge(playerId, payload.attackIndex);
+        break;
       case 'take':
         result = room.game.take(playerId);
         break;
@@ -142,6 +179,10 @@ export class RoomManager {
         break;
       default:
         return { ok: false, error: 'Неизвестное действие' };
+    }
+
+    if (result.ok && room.game.status === 'finished') {
+      this.payWinner(room);
     }
 
     return { ...result, room };
@@ -157,6 +198,7 @@ export class RoomManager {
       deckSize: room.deckSize,
       gameMode: room.gameMode,
       allowCheating: room.allowCheating,
+      entryFee: room.entryFee,
       players: room.players.map(p => ({ id: p.id, name: p.name })),
     };
   }
@@ -167,7 +209,13 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return null;
 
+    const leaving = room.players.find(p => p.id === playerId);
     const wasPublic = room.isPublic;
+
+    if (room.status === 'waiting' && leaving?.paidEntry > 0) {
+      this.wallet.add(playerId, leaving.paidEntry);
+    }
+
     room.players = room.players.filter(p => p.id !== playerId);
     this.playerRooms.delete(playerId);
 

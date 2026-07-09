@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import { RoomManager } from './rooms/RoomManager.js';
+import { WalletManager } from './wallet/WalletManager.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -22,7 +23,8 @@ app.use(cors({
 }));
 app.use(express.json());
 
-const roomManager = new RoomManager();
+const walletManager = new WalletManager();
+const roomManager = new RoomManager(walletManager);
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 app.get('/api/rooms', (_, res) => res.json(roomManager.getPublicRooms()));
@@ -31,13 +33,20 @@ function broadcastPublicRooms() {
   io.emit('rooms:list', roomManager.getPublicRooms());
 }
 
+function emitWallet(socket, playerId) {
+  if (!playerId || !socket) return;
+  socket.emit('wallet:update', { balance: walletManager.getBalance(playerId) });
+}
+
 function emitGameState(room) {
   for (const player of room.players) {
     if (player.socketId) {
+      const sock = io.sockets.sockets.get(player.socketId);
       io.to(player.socketId).emit('game:state', {
         lobby: roomManager.getLobbyState(room),
         game: room.game ? room.game.getStateForPlayer(player.id) : null,
       });
+      emitWallet(sock, player.id);
     }
   }
 }
@@ -59,6 +68,7 @@ io.on('connection', (socket) => {
     playerId = id || socket.id;
     playerName = name || 'Игрок';
     const room = roomManager.setSocket(playerId, socket.id);
+    emitWallet(socket, playerId);
     if (room) {
       socket.join(room.id);
       emitGameState(room);
@@ -74,14 +84,25 @@ io.on('connection', (socket) => {
   socket.on('room:create', (data, callback) => {
     playerId = data?.id || socket.id;
     playerName = data?.name || 'Игрок';
-    const room = roomManager.createRoom(playerId, playerName, {
+    const result = roomManager.createRoom(playerId, playerName, {
       isPublic: data?.isPublic,
       maxPlayers: data?.maxPlayers,
+      deckSize: data?.deckSize,
+      gameMode: data?.gameMode,
+      allowCheating: data?.allowCheating,
+      entryFee: data?.entryFee,
     });
+    if (!result.ok) {
+      callback?.(result);
+      emitWallet(socket, playerId);
+      return;
+    }
+    const room = result.room;
     roomManager.setSocket(playerId, socket.id);
     socket.join(room.id);
     callback?.({ ok: true, room: roomManager.getLobbyState(room) });
     emitGameState(room);
+    emitWallet(socket, playerId);
     if (room.isPublic) broadcastPublicRooms();
   });
 
@@ -91,12 +112,14 @@ io.on('connection', (socket) => {
     const result = roomManager.joinRoom(data.roomId, playerId, playerName);
     if (!result.ok) {
       callback?.(result);
+      emitWallet(socket, playerId);
       return;
     }
     roomManager.setSocket(playerId, socket.id);
     socket.join(result.room.id);
     callback?.({ ok: true, room: roomManager.getLobbyState(result.room) });
     emitGameState(result.room);
+    emitWallet(socket, playerId);
     notifyRoomUpdate(result.room);
   });
 
@@ -104,6 +127,7 @@ io.on('connection', (socket) => {
     const result = roomManager.leaveRoom(playerId);
     socket.leaveAll();
     callback?.({ ok: true });
+    emitWallet(socket, playerId);
     if (result?.room) {
       notifyRoomUpdate(result.room);
       emitGameState(result.room);
