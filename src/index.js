@@ -111,3 +111,5 @@ const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`🃏 Durak server running on http://localhost:${PORT}`);
 });
+
+import('./bot.js').then(({ startBot }) => startBot()).catch(() => {});
