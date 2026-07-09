@@ -7,13 +7,18 @@ export class RoomManager {
     this.playerRooms = new Map();
   }
 
-  createRoom(hostId, hostName) {
+  createRoom(hostId, hostName, options = {}) {
+    const isPublic = Boolean(options.isPublic);
+    const maxPlayers = Math.min(Math.max(options.maxPlayers || 2, 2), 4);
     const roomId = uuidv4().slice(0, 6).toUpperCase();
     const room = {
       id: roomId,
       players: [{ id: hostId, name: hostName, socketId: null }],
       game: null,
       status: 'waiting',
+      isPublic,
+      maxPlayers,
+      hostId,
       createdAt: Date.now(),
     };
     this.rooms.set(roomId, room);
@@ -25,7 +30,9 @@ export class RoomManager {
     const room = this.rooms.get(roomId.toUpperCase());
     if (!room) return { ok: false, error: 'Комната не найдена' };
     if (room.status !== 'waiting') return { ok: false, error: 'Игра уже началась' };
-    if (room.players.length >= 2) return { ok: false, error: 'Комната полна' };
+    if (room.players.length >= room.maxPlayers) {
+      return { ok: false, error: 'Комната полна' };
+    }
     if (room.players.some(p => p.id === playerId)) {
       return { ok: true, room };
     }
@@ -48,8 +55,8 @@ export class RoomManager {
   startGame(roomId, playerId) {
     const room = this.rooms.get(roomId);
     if (!room) return { ok: false, error: 'Комната не найдена' };
-    if (room.players[0].id !== playerId) return { ok: false, error: 'Только хост может начать' };
-    if (room.players.length < 2) return { ok: false, error: 'Нужен второй игрок' };
+    if (room.hostId !== playerId) return { ok: false, error: 'Только хост может начать' };
+    if (room.players.length < 2) return { ok: false, error: 'Нужно минимум 2 игрока' };
 
     const playerIds = room.players.map(p => p.id);
     room.game = new DurakGame(playerIds);
@@ -64,6 +71,22 @@ export class RoomManager {
   getRoomByPlayer(playerId) {
     const roomId = this.playerRooms.get(playerId);
     return roomId ? this.rooms.get(roomId) : null;
+  }
+
+  getPublicRooms() {
+    return Array.from(this.rooms.values())
+      .filter(r => r.isPublic && r.status === 'waiting')
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(r => this.getPublicRoomState(r));
+  }
+
+  getPublicRoomState(room) {
+    return {
+      id: room.id,
+      hostName: room.players[0]?.name || 'Хост',
+      playerCount: room.players.length,
+      maxPlayers: room.maxPlayers,
+    };
   }
 
   rematch(playerId) {
@@ -107,27 +130,39 @@ export class RoomManager {
     return {
       id: room.id,
       status: room.status,
+      isPublic: room.isPublic,
+      maxPlayers: room.maxPlayers,
+      hostId: room.hostId,
       players: room.players.map(p => ({ id: p.id, name: p.name })),
     };
   }
 
   leaveRoom(playerId) {
     const roomId = this.playerRooms.get(playerId);
-    if (!roomId) return;
+    if (!roomId) return null;
     const room = this.rooms.get(roomId);
-    if (!room) return;
+    if (!room) return null;
 
     room.players = room.players.filter(p => p.id !== playerId);
     this.playerRooms.delete(playerId);
 
     if (room.players.length === 0) {
       this.rooms.delete(roomId);
-    } else if (room.status === 'playing') {
+      return { room: null, wasPublic: room.isPublic };
+    }
+
+    if (room.hostId === playerId) {
+      room.hostId = room.players[0].id;
+    }
+
+    if (room.status === 'playing') {
       room.status = 'finished';
       if (room.game) {
         room.game.status = 'finished';
         room.game.winner = room.players[0].id;
       }
     }
+
+    return { room, wasPublic: room.isPublic };
   }
 }

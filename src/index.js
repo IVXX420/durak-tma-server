@@ -25,6 +25,11 @@ app.use(express.json());
 const roomManager = new RoomManager();
 
 app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/api/rooms', (_, res) => res.json(roomManager.getPublicRooms()));
+
+function broadcastPublicRooms() {
+  io.emit('rooms:list', roomManager.getPublicRooms());
+}
 
 function emitGameState(room) {
   for (const player of room.players) {
@@ -37,9 +42,18 @@ function emitGameState(room) {
   }
 }
 
+function notifyRoomUpdate(room) {
+  if (!room) return;
+  const lobby = roomManager.getLobbyState(room);
+  io.to(room.id).emit('room:update', lobby);
+  if (room.isPublic) broadcastPublicRooms();
+}
+
 io.on('connection', (socket) => {
   let playerId = null;
   let playerName = 'Игрок';
+
+  socket.emit('rooms:list', roomManager.getPublicRooms());
 
   socket.on('player:init', ({ id, name }) => {
     playerId = id || socket.id;
@@ -51,14 +65,24 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('rooms:list', (callback) => {
+    const rooms = roomManager.getPublicRooms();
+    callback?.(rooms);
+    socket.emit('rooms:list', rooms);
+  });
+
   socket.on('room:create', (data, callback) => {
     playerId = data?.id || socket.id;
     playerName = data?.name || 'Игрок';
-    const room = roomManager.createRoom(playerId, playerName);
+    const room = roomManager.createRoom(playerId, playerName, {
+      isPublic: data?.isPublic,
+      maxPlayers: data?.maxPlayers,
+    });
     roomManager.setSocket(playerId, socket.id);
     socket.join(room.id);
     callback?.({ ok: true, room: roomManager.getLobbyState(room) });
     emitGameState(room);
+    if (room.isPublic) broadcastPublicRooms();
   });
 
   socket.on('room:join', (data, callback) => {
@@ -73,6 +97,20 @@ io.on('connection', (socket) => {
     socket.join(result.room.id);
     callback?.({ ok: true, room: roomManager.getLobbyState(result.room) });
     emitGameState(result.room);
+    notifyRoomUpdate(result.room);
+  });
+
+  socket.on('room:leave', (callback) => {
+    const result = roomManager.leaveRoom(playerId);
+    socket.leaveAll();
+    callback?.({ ok: true });
+    if (result?.room) {
+      notifyRoomUpdate(result.room);
+      emitGameState(result.room);
+    } else if (result?.wasPublic) {
+      broadcastPublicRooms();
+    }
+    socket.emit('game:state', { lobby: null, game: null });
   });
 
   socket.on('game:start', (callback) => {
@@ -83,7 +121,10 @@ io.on('connection', (socket) => {
     }
     const result = roomManager.startGame(room.id, playerId);
     callback?.(result.ok ? { ok: true } : result);
-    if (result.ok) emitGameState(room);
+    if (result.ok) {
+      emitGameState(room);
+      if (room.isPublic) broadcastPublicRooms();
+    }
   });
 
   socket.on('game:action', (data, callback) => {
@@ -118,10 +159,11 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     if (playerId) {
-      const room = roomManager.getRoomByPlayer(playerId);
-      roomManager.leaveRoom(playerId);
-      if (room) {
-        io.to(room.id).emit('room:update', roomManager.getLobbyState(room));
+      const result = roomManager.leaveRoom(playerId);
+      if (result?.room) {
+        notifyRoomUpdate(result.room);
+      } else if (result?.wasPublic) {
+        broadcastPublicRooms();
       }
     }
   });

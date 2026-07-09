@@ -108,7 +108,11 @@ export class DurakGame {
 
   attack(playerId, cardId) {
     if (this.status !== 'playing') return { ok: false, error: 'Игра окончена' };
-    if (playerId !== this.attackerId) return { ok: false, error: 'Не ваш ход' };
+    if (this.phase === 'throw') {
+      if (playerId === this.defenderId) return { ok: false, error: 'Защитник не подкидывает' };
+    } else if (playerId !== this.attackerId) {
+      return { ok: false, error: 'Не ваш ход' };
+    }
     if (!['attack', 'throw'].includes(this.phase)) return { ok: false, error: 'Сейчас нельзя атаковать' };
 
     const hand = this.hands[playerId];
@@ -237,8 +241,9 @@ export class DurakGame {
   }
 
   drawCards() {
-    const order = [this.attackerId, this.defenderId];
-    for (const id of order) {
+    const n = this.playerIds.length;
+    for (let i = 0; i < n; i++) {
+      const id = this.playerIds[(this.attackerIndex + i) % n];
       while (this.hands[id].length < 6 && this.deck.length > 0) {
         this.hands[id].push(this.deck.shift());
       }
@@ -260,20 +265,28 @@ export class DurakGame {
   }
 
   getStateForPlayer(playerId) {
-    const opponentId = this.playerIds.find(id => id !== playerId);
+    const opponents = this.playerIds
+      .filter(id => id !== playerId)
+      .map(id => ({ id, cardCount: (this.hands[id] || []).length }));
+
+    const legacyOpponent = opponents[0];
+
     return {
       status: this.status,
       trump: this.trump,
       trumpSuit: this.trumpSuit,
       deckCount: this.deck.length,
       hand: this.hands[playerId] || [],
-      opponentCardCount: (this.hands[opponentId] || []).length,
+      opponents,
+      opponentCardCount: legacyOpponent?.cardCount ?? 0,
+      playerCount: this.playerIds.length,
       table: this.table,
       phase: this.phase,
       attackerId: this.attackerId,
       defenderId: this.defenderId,
       isAttacker: playerId === this.attackerId,
       isDefender: playerId === this.defenderId,
+      canThrow: this.phase === 'throw' && playerId !== this.defenderId,
       isYourTurn: this.isPlayerTurn(playerId),
       winner: this.winner,
       fool: this.fool,
@@ -284,8 +297,11 @@ export class DurakGame {
 
   isPlayerTurn(playerId) {
     if (this.status !== 'playing') return false;
-    if (this.phase === 'attack' || this.phase === 'throw') {
+    if (this.phase === 'attack') {
       return playerId === this.attackerId;
+    }
+    if (this.phase === 'throw') {
+      return playerId !== this.defenderId;
     }
     if (this.phase === 'defend') {
       return playerId === this.defenderId;
